@@ -1,6 +1,7 @@
 """Style tab: chart-style card (title/subtitle font, padding, size, dpi) plus
 the Line/Marker cards for whichever series/fit entry is currently selected.
 """
+import numpy as np
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -42,6 +43,7 @@ from pandaplot.models.chart.series_style import (
     VectorSeriesStyle,
     WireframeSeriesStyle,
 )
+from pandaplot.models.chart.series_style.fill import FillStyleFields
 from pandaplot.models.chart.series_type import SeriesType
 from pandaplot.models.chart.series_type_spec import SERIES_TYPE_SPECS
 from pandaplot.models.events.event_types import ConfigEvents
@@ -158,6 +160,9 @@ class StyleTab(QWidget):
         # Fill card's "Fill to" selector can offer the other series to fill
         # between. Indices into this list are what fill_to_index stores.
         self._data_series: list = []
+        # (x, y) arrays of the series shown in the Fill card, for the Limit
+        # range point readouts; None when its data can't be resolved.
+        self._fill_points: tuple | None = None
         # Whether the Custom size/DPI fields have already been pre-filled
         # for the currently loaded chart (reset on every load_chart_style/
         # clear_chart_style call). Prevents re-filling with defaults if the
@@ -518,6 +523,33 @@ class StyleTab(QWidget):
         self.fill_opacity_slider = SliderWithSpinbox(minimum=0.0, maximum=1.0, decimals=2)
         fill_layout.addWidget(self.fill_opacity_slider, 6, 1)
 
+        # Restrict the fill to a sub-range of the series' independent
+        # variable (x for vertical, y for horizontal) instead of its full
+        # extent -- e.g. to shade/integrate over just one segment of a
+        # curve (#280). Off by default: the min/max fields only matter, and
+        # are only shown, while this is on.
+        self.fill_range_label = QLabel("Limit range:")
+        fill_layout.addWidget(self.fill_range_label, 7, 0)
+        self.fill_range_enabled_toggle = ToggleSwitch()
+        fill_layout.addWidget(self.fill_range_enabled_toggle, 7, 1)
+
+        # Both bounds are 1-based data-point row numbers (matching the
+        # dataset table and the Analysis panel's Start/End Row), each with the
+        # point's x/y beside it. They default to the first and last point.
+        self.fill_range_start_label = QLabel("From point:")
+        fill_layout.addWidget(self.fill_range_start_label, 8, 0)
+        self.fill_range_start_spin = QSpinBox()
+        self.fill_range_start_spin.setRange(1, 1)
+        self.fill_range_start_value_label = QLabel("–")
+        fill_layout.addLayout(self._fill_range_row(self.fill_range_start_spin, self.fill_range_start_value_label), 8, 1)
+
+        self.fill_range_end_label = QLabel("To point:")
+        fill_layout.addWidget(self.fill_range_end_label, 9, 0)
+        self.fill_range_end_spin = QSpinBox()
+        self.fill_range_end_spin.setRange(1, 1)
+        self.fill_range_end_value_label = QLabel("–")
+        fill_layout.addLayout(self._fill_range_row(self.fill_range_end_spin, self.fill_range_end_value_label), 9, 1)
+
         layout.addWidget(fill_card)
 
         # MARKERS group
@@ -845,6 +877,9 @@ class StyleTab(QWidget):
         self.fill_color_row.colorChanged.connect(self._on_field_changed)
         self.fill_match_line_toggle.toggled.connect(self._on_fill_match_line_toggled)
         self.fill_opacity_slider.valueChanged.connect(self._on_field_changed)
+        self.fill_range_enabled_toggle.toggled.connect(self._on_fill_range_enabled_toggled)
+        self.fill_range_start_spin.valueChanged.connect(self._on_fill_range_changed)
+        self.fill_range_end_spin.valueChanged.connect(self._on_fill_range_changed)
         self.markers_enabled_toggle.toggled.connect(self._on_markers_enabled_toggled)
         self.marker_shape_control.currentValueChanged.connect(self._on_field_changed)
         self.marker_size_slider.valueChanged.connect(self._on_field_changed)
@@ -1684,6 +1719,48 @@ class StyleTab(QWidget):
         self._update_fill_controls_visibility()
         self._on_field_changed()
 
+    def _on_fill_range_enabled_toggled(self, _checked: bool):  # noqa: FBT001 - Qt signal-slot callback, called positionally
+        """Handle the Fill 'Limit range' toggle: show/hide the From/To fields."""
+        self._update_fill_controls_visibility()
+        self._on_field_changed()
+
+    @staticmethod
+    def _fill_range_row(spin: QSpinBox, value_label: QLabel) -> QHBoxLayout:
+        """A spin box with its data point's x/y readout beside it."""
+        row = QHBoxLayout()
+        row.addWidget(spin)
+        row.addWidget(value_label, 1)
+        return row
+
+    def _on_fill_range_changed(self, _value: int):
+        """Handle an edit of a Limit-range point: refresh its x/y readout, then commit."""
+        self._update_fill_range_labels()
+        self._on_field_changed()
+
+    def _resolve_fill_points(self, series) -> tuple | None:
+        """The (x, y) arrays of `series` as plotted, or None when unresolvable
+        (no project, or the dataset/columns are missing)."""
+        from pandaplot.gui.components.tabs.chart.chart_editor import resolve_series_data
+        app_state = self.app_context.get_app_state() if self.app_context else None
+        project = app_state.current_project if app_state is not None and app_state.has_project else None
+        data = resolve_series_data(project, series)
+        if data.error or data.x_data is None or data.y_data is None:
+            return None
+        return np.asarray(data.x_data), np.asarray(data.y_data)
+
+    def _update_fill_range_labels(self):
+        """Show the x/y of the data point each Limit-range spin box selects."""
+        points = self._fill_points
+        for spin, label in (
+            (self.fill_range_start_spin, self.fill_range_start_value_label),
+            (self.fill_range_end_spin, self.fill_range_end_value_label),
+        ):
+            index = spin.value() - 1
+            if points is None or not 0 <= index < len(points[0]):
+                label.setText("–")
+            else:
+                label.setText(f"x={points[0][index]:.4g}, y={points[1][index]:.4g}")
+
     def _update_fill_controls_visibility(self):
         """Show the fill sub-controls only while fill is on -- hidden, not
         just greyed, when off (same convention as
@@ -1692,6 +1769,11 @@ class StyleTab(QWidget):
         when filling between two curves instead of to a baseline."""
         enabled = self.fill_enabled_toggle.isChecked()
         self.fill_header.setEnabled(enabled)
+
+        # A scatter has no line: its fill inherits the marker color instead.
+        _, target = self._current_target
+        is_scatter = isinstance(target, DataSeries) and target.series_type == SeriesType.SCATTER
+        self.fill_match_line_label.setText("Match marker:" if is_scatter else "Match line:")
 
         for widget in (
             self.fill_horizontal_label, self.fill_horizontal_toggle,
@@ -1714,6 +1796,15 @@ class StyleTab(QWidget):
         show_color = enabled and not self.fill_match_line_toggle.isChecked()
         self.fill_color_label.setVisible(show_color)
         self.fill_color_row.setVisible(show_color)
+
+        self.fill_range_label.setVisible(enabled)
+        self.fill_range_enabled_toggle.setVisible(enabled)
+        show_range_bounds = enabled and self.fill_range_enabled_toggle.isChecked()
+        for widget in (
+            self.fill_range_start_label, self.fill_range_start_spin, self.fill_range_start_value_label,
+            self.fill_range_end_label, self.fill_range_end_spin, self.fill_range_end_value_label,
+        ):
+            widget.setVisible(show_range_bounds)
 
     # -- Value-labels controls ----------------------------------------------
 
@@ -1934,9 +2025,9 @@ class StyleTab(QWidget):
 
         # Area fill. "Match line" reuses the "" == inherit-style.color
         # convention. fill_to_index is -1 (fill down to the constant baseline)
-        # or the index of another series to fill between. Only
-        # LineSeriesStyle declares fill fields.
-        if isinstance(style, LineSeriesStyle):
+        # or the index of another series to fill between. Only styles with
+        # the shared FillStyleFields (Line, Scatter) declare fill fields.
+        if isinstance(style, FillStyleFields):
             style.fill_enabled = self.fill_enabled_toggle.isChecked()
             style.fill_orientation = (
                 "horizontal" if self.fill_horizontal_toggle.isChecked() else "vertical"
@@ -1948,6 +2039,14 @@ class StyleTab(QWidget):
                 else self.fill_color_row.currentColor()
             )
             style.fill_alpha = self.fill_opacity_slider.value()
+            style.fill_range_enabled = self.fill_range_enabled_toggle.isChecked()
+            style.fill_range_start = self.fill_range_start_spin.value() - 1
+            # The last point is stored as -1 so the range keeps tracking the
+            # end of the series if rows are appended.
+            style.fill_range_end = (
+                -1 if self.fill_range_end_spin.value() == self.fill_range_end_spin.maximum()
+                else self.fill_range_end_spin.value() - 1
+            )
 
     def apply_fit_style_to(self, fit):
         style = fit.style
@@ -2110,6 +2209,17 @@ class StyleTab(QWidget):
             self.fill_match_line_toggle.setChecked(checked=fill_color == "")
             self.fill_match_line_toggle.blockSignals(False)  # noqa: FBT003 - Qt bound method, positional-only
             self.fill_opacity_slider.setValue(getattr(style, "fill_alpha", 0.3))
+            self.fill_range_enabled_toggle.blockSignals(True)  # noqa: FBT003 - Qt bound method, positional-only
+            self.fill_range_enabled_toggle.setChecked(checked=getattr(style, "fill_range_enabled", False))
+            self.fill_range_enabled_toggle.blockSignals(False)  # noqa: FBT003 - Qt bound method, positional-only
+            self._fill_points = self._resolve_fill_points(series)
+            point_count = max(len(self._fill_points[0]), 1) if self._fill_points is not None else 1
+            self.fill_range_start_spin.setRange(1, point_count)
+            self.fill_range_end_spin.setRange(1, point_count)
+            self.fill_range_start_spin.setValue(getattr(style, "fill_range_start", 0) + 1)
+            fill_range_end = getattr(style, "fill_range_end", -1)
+            self.fill_range_end_spin.setValue(point_count if fill_range_end < 0 else fill_range_end + 1)
+            self._update_fill_range_labels()
             self._update_fill_controls_visibility()
         finally:
             self._updating_controls = previous_guard
