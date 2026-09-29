@@ -361,9 +361,11 @@ def resolve_series_data(project, series, chart_type=None) -> SeriesData:
     Error columns are resolved leniently since optional (see
     _resolve_error_column); x_err_minus/y_err_minus only matter when
     error_bars.error_symmetric is False. Secondary columns (u_data/v_data
-    required, magnitude_data optional) and the Colormap/Heatmap Z column
-    are resolved the same way, but required ones error out the whole
-    series when unresolvable.
+    required, w_data required only for Vector3D, magnitude_data optional
+    and only for 2-D Vector) and the Z column (a color channel for
+    Colormap/Heatmap, the third spatial axis for every 3-D type including
+    Vector3D) are resolved the same way, but required ones error out the
+    whole series when unresolvable.
     """
     from pandaplot.models.project.items.chart import resolve_series_column
     from pandaplot.models.project.items.dataset import Dataset
@@ -398,8 +400,9 @@ def resolve_series_data(project, series, chart_type=None) -> SeriesData:
     x_err_minus = _resolve_error_column(df, resolve_series_column(dataset, error_bars.x_error_minus_column_id, error_bars.x_error_minus_column))
     y_err_minus = _resolve_error_column(df, resolve_series_column(dataset, error_bars.y_error_minus_column_id, error_bars.y_error_minus_column))
 
-    u_data = v_data = magnitude_data = None
-    if SERIES_TYPE_SPECS[SeriesType(chart_type) if chart_type else series.series_type].needs_secondary_columns:
+    spec = SERIES_TYPE_SPECS[SeriesType(chart_type) if chart_type else series.series_type]
+    u_data = v_data = w_data = magnitude_data = None
+    if spec.needs_secondary_columns:
         u_column = resolve_series_column(dataset, series.style.u_column_id, series.style.u_column)
         v_column = resolve_series_column(dataset, series.style.v_column_id, series.style.v_column)
         if not u_column or not v_column:
@@ -410,12 +413,27 @@ def resolve_series_data(project, series, chart_type=None) -> SeriesData:
             return SeriesData(None, None, None, None, None, None, f"column {cols} not found in '{dataset.name}'")
         u_data = df[u_column]
         v_data = df[v_column]
-        magnitude_column = resolve_series_column(dataset, series.style.magnitude_column_id, series.style.magnitude_column)
-        if magnitude_column and magnitude_column in df.columns:
-            magnitude_data = df[magnitude_column]
+        # A 3-D vector's arrow has a third (W) component -- only
+        # Vector3DSeriesStyle declares w_column_id, so this is a no-op for
+        # the 2-D Vector type.
+        if spec.needs_w_column:
+            w_column = resolve_series_column(dataset, series.style.w_column_id, series.style.w_column)
+            if not w_column:
+                return SeriesData(None, None, None, None, None, None, "no W column configured")
+            if w_column not in df.columns:
+                return SeriesData(None, None, None, None, None, None, f"W column '{w_column}' not found")
+            w_data = df[w_column]
+        # Magnitude-driven coloring is a 2-D Vector-only feature (see
+        # Vector3DSeriesStyle's docstring) -- guarded by hasattr rather than
+        # a spec flag since needs_secondary_columns alone no longer implies
+        # a magnitude field exists.
+        if hasattr(series.style, "magnitude_column_id"):
+            magnitude_column = resolve_series_column(dataset, series.style.magnitude_column_id, series.style.magnitude_column)
+            if magnitude_column and magnitude_column in df.columns:
+                magnitude_data = df[magnitude_column]
 
     z_data = None
-    if SERIES_TYPE_SPECS[SeriesType(chart_type) if chart_type else series.series_type].needs_z_column:
+    if spec.needs_z_column:
         z_column = resolve_series_column(dataset, series.style.z_column_id, series.style.z_column)
         if not z_column:
             return SeriesData(None, None, None, None, None, None, "no Z column configured")
@@ -424,7 +442,7 @@ def resolve_series_data(project, series, chart_type=None) -> SeriesData:
         z_data = df[z_column]
 
     return SeriesData(x_data, df[y_column], x_err, y_err, x_err_minus, y_err_minus, None,
-                      u_data=u_data, v_data=v_data, magnitude_data=magnitude_data, z_data=z_data)
+                      u_data=u_data, v_data=v_data, w_data=w_data, magnitude_data=magnitude_data, z_data=z_data)
 
 
 def compute_axis_data_range(project, data_series, prefix: str, *, positive_only: bool = False) -> tuple[float, float] | None:
@@ -810,12 +828,15 @@ class ChartEditorWidget(PWidget):
         return np.interp(np.asarray(query, dtype=float), xp[order], fp[order])
 
     def _resolve_z_label(self, project, series) -> str:
-        """Current display name of a series' Z (color) column, for the
-        default colorbar label. Empty when it can't be resolved (missing
+        """Current display name of a series' color column (Z, or the
+        magnitude column for a Vector/Vector3D series), for the default
+        colorbar label. Empty when it can't be resolved (missing
         dataset/column) so the colorbar just goes unlabeled rather than
         erroring."""
         from pandaplot.models.project.items.chart import resolve_series_column
         dataset = project.find_item(series.dataset_id) if project else None
+        if hasattr(series.style, "magnitude_column_id"):
+            return resolve_series_column(dataset, series.style.magnitude_column_id, series.style.magnitude_column) or ""
         return resolve_series_column(dataset, series.style.z_column_id, series.style.z_column) or ""
 
     def update_chart(self):
@@ -994,8 +1015,11 @@ class ChartEditorWidget(PWidget):
                     if mappable is None and series_type in SERIES_RENDERERS_REPORTING_NO_DATA:
                         series_errors.append(f"{series.label or f'Series {i + 1}'}: no plottable data")
                         continue
+                    # A Vector/Vector3D renderer only returns a mappable when
+                    # its arrows are colored by magnitude; that gets a
+                    # colorbar too, though the type isn't on the shared scale.
                     if (mappable is not None and colorbar_mappable is None
-                            and SERIES_TYPE_SPECS[series_type].uses_color_scale
+                            and (SERIES_TYPE_SPECS[series_type].uses_color_scale or hasattr(style, "magnitude_column_id"))
                             and self.chart.config.colorbar_show):
                         colorbar_mappable = mappable
                         # None means "not customized" -- fall back to the Z
