@@ -33,6 +33,7 @@ from pandaplot.models.chart.chart_type import ChartType
 from pandaplot.models.chart.chart_type_spec import CHART_TYPE_SPECS
 from pandaplot.models.chart.error_direction import ErrorDirection
 from pandaplot.models.chart.series_style import (
+    BoxSeriesStyle,
     ColormapSeriesStyle,
     HeatmapSeriesStyle,
     Line3DSeriesStyle,
@@ -782,6 +783,31 @@ class StyleTab(QWidget):
 
         layout.addWidget(vector3d_card)
 
+        # BOX group -- the box-and-whisker-specific settings. No color row
+        # here: Box's spec sets supports_color, so the Line card's color/
+        # opacity rows already show for it and write style.color/series.
+        # alpha, exactly as they do for Bar/Hist. A second color row would
+        # make two controls fight over the same field.
+        self.box_card = Card()
+        box_card = self.box_card
+        box_layout = QGridLayout(box_card)
+        box_layout.addWidget(SectionHeader("Box"), 0, 0, 1, 2)
+
+        box_layout.addWidget(QLabel("Show outliers:"), 1, 0)
+        self.box_show_outliers_toggle = ToggleSwitch(checked=True)
+        box_layout.addWidget(self.box_show_outliers_toggle, 1, 1)
+
+        box_layout.addWidget(QLabel("Notched:"), 2, 0)
+        self.box_notch_toggle = ToggleSwitch()
+        box_layout.addWidget(self.box_notch_toggle, 2, 1)
+
+        # Sibling boxes sit 1.0 apart on X, so a width of 1.0 makes
+        # neighbours touch; past that they'd overlap.
+        box_layout.addWidget(QLabel("Width:"), 3, 0)
+        self.box_width_slider = SliderWithSpinbox(minimum=0.05, maximum=1.0, decimals=2)
+        box_layout.addWidget(self.box_width_slider, 3, 1)
+
+        layout.addWidget(box_card)
         # PIE group -- a pie has no line/marker/fill/error bars and no single
         # series color (wedges cycle the default palette -- see
         # PieSeriesStyle), so this card is all a Pie series gets.
@@ -950,6 +976,9 @@ class StyleTab(QWidget):
         self.vector3d_colormap_control.currentValueChanged.connect(self._on_field_changed)
         self.vector3d_arrow_ratio_slider.valueChanged.connect(self._on_field_changed)
         self.vector3d_normalize_toggle.toggled.connect(self._on_field_changed)
+        self.box_show_outliers_toggle.toggled.connect(self._on_field_changed)
+        self.box_notch_toggle.toggled.connect(self._on_field_changed)
+        self.box_width_slider.valueChanged.connect(self._on_field_changed)
         self.pie_start_angle_slider.valueChanged.connect(self._on_field_changed)
         self.pie_show_percentages_toggle.toggled.connect(self._on_field_changed)
         self.pie_donut_width_slider.valueChanged.connect(self._on_field_changed)
@@ -1111,6 +1140,7 @@ class StyleTab(QWidget):
         # quiver's -- see Vector3DSeriesStyle's docstring).
         self.vector_card.setVisible(kind == "series" and spec is not None and spec.style_cls is VectorSeriesStyle)
         self.vector3d_card.setVisible(kind == "series" and spec is not None and spec.style_cls is Vector3DSeriesStyle)
+        self.box_card.setVisible(kind == "series" and spec is not None and spec.style_cls is BoxSeriesStyle)
         self.pie_card.setVisible(kind == "series" and spec is not None and spec.style_cls is PieSeriesStyle)
         self.heatmap_gridding_card.setVisible(kind == "series" and spec is not None and spec.supports_gridding)
         # Re-evaluate "Match line" visibility: it depends on both kind and
@@ -1947,6 +1977,12 @@ class StyleTab(QWidget):
             style.vector_normalize = self.vector3d_normalize_toggle.isChecked()
             return
 
+        if isinstance(style, BoxSeriesStyle):
+            # No return: color/opacity are written by the shared Line-card
+            # branch below, the same as for Bar/Hist.
+            style.show_outliers = self.box_show_outliers_toggle.isChecked()
+            style.notch = self.box_notch_toggle.isChecked()
+            style.box_width = self.box_width_slider.value()
         if isinstance(style, PieSeriesStyle):
             # Nothing else applies -- in particular not opacity: the Line
             # card owning that slider is hidden for a pie, so it holds
@@ -2141,6 +2177,9 @@ class StyleTab(QWidget):
             self.vector3d_arrow_ratio_slider.setValue(getattr(style, "vector_arrow_ratio", 0.3))
             self.vector3d_normalize_toggle.setChecked(checked=getattr(style, "vector_normalize", False))
 
+            self.box_show_outliers_toggle.setChecked(checked=getattr(style, "show_outliers", True))
+            self.box_notch_toggle.setChecked(checked=getattr(style, "notch", False))
+            self.box_width_slider.setValue(getattr(style, "box_width", 0.5))
             self.pie_start_angle_slider.setValue(getattr(style, "start_angle", 90.0))
             self.pie_show_percentages_toggle.setChecked(checked=getattr(style, "show_percentages", True))
             self.pie_donut_width_slider.setValue(getattr(style, "donut_width", 0.0))
@@ -2758,6 +2797,10 @@ class StyleTab(QWidget):
         self.vector3d_colormap_control.set_tokens(tokens)
         self.vector3d_arrow_ratio_slider.set_tokens(tokens)
         self.vector3d_normalize_toggle.set_tokens(tokens)
+        self.box_card.set_tokens(tokens)
+        self.box_show_outliers_toggle.set_tokens(tokens)
+        self.box_notch_toggle.set_tokens(tokens)
+        self.box_width_slider.set_tokens(tokens)
         self.pie_card.set_tokens(tokens)
         self.pie_start_angle_slider.set_tokens(tokens)
         self.pie_show_percentages_toggle.set_tokens(tokens)
