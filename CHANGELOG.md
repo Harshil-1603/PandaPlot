@@ -13,6 +13,9 @@ into the GitHub Release notes automatically (see `.github/workflows/release_inst
 
 ## [Unreleased]
 
+### Fixed
+- Adding an item beneath a non-folder project item keeps it in the nearest ancestor folder instead of relocating it to the root.
+
 ### Added
 - Stacked Bar chart type: each series stacks on top of the earlier ones at the same X (negative values stack downward), with error bars, value labels, a wizard preview, and lossless switching to and from Bar. Fits are not available on stacked charts.
 - Ready-to-open curve-fitting example project with fitted charts, uncertainty bars, confidence bands, and a PNG preview.
