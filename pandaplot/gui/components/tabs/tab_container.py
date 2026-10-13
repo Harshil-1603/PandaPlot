@@ -31,7 +31,7 @@ class TabContainer(PWidget):
 
     active_tab_changed = Signal(object)  # the widget of the active pane's current tab, or None
 
-    def __init__(self, app_context: AppContext, parent: QWidget):
+    def __init__(self, app_context: AppContext, parent: QWidget | None):
         super().__init__(app_context=app_context, parent=parent)
         self.tabs = {}
         self.panes: list[CustomTabWidget] = []

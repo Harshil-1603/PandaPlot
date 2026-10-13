@@ -31,9 +31,13 @@ def test_floating_activation_and_same_pane_focus_restore_fit_context(qtbot: QtBo
     project = Project(name="Floating context")
     dataset = Dataset(name="Data", data=pd.DataFrame({"x": [1, 2, 3], "y": [2, 4, 6]}))
     project.add_item(dataset)
+    x_column_id = dataset.column_id("x")
+    y_column_id = dataset.column_id("y")
+    assert x_column_id is not None
+    assert y_column_id is not None
     charts = [Chart(name="Chart A"), Chart(name="Chart B")]
     for chart in charts:
-        chart.add_data_series(dataset_id=dataset.id, x_column_id=dataset.column_id("x"), y_column_id=dataset.column_id("y"))
+        chart.add_data_series(dataset_id=dataset.id, x_column_id=x_column_id, y_column_id=y_column_id)
         project.add_item(chart)
     context = Mock()
     context.app_state = SimpleNamespace(current_project=project, has_project=True)
