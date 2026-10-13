@@ -170,13 +170,14 @@ def test_curve_analysis_is_supported_only_by_line_and_scatter():
         assert SERIES_TYPE_SPECS[series_type].supports_curve_analysis is expected, series_type
 
 
-def test_value_labels_are_supported_only_by_line_scatter_and_bar():
+def test_value_labels_are_supported_only_by_line_scatter_and_bar_types():
     """Regression (#125): each rendered point/bar can be annotated with its
     own numeric value only for the types with a single scalar value per
-    plotted element (a Line/Scatter point's Y, a Bar's height). Asserted
-    against the full SeriesType enum so a newly added type defaults to
-    being excluded rather than silently inheriting an unsupported option."""
-    value_label_types = {SeriesType.LINE, SeriesType.SCATTER, SeriesType.BAR}
+    plotted element (a Line/Scatter point's Y, a Bar's or a Stacked Bar
+    segment's height). Asserted against the full SeriesType enum so a newly
+    added type defaults to being excluded rather than silently inheriting an
+    unsupported option."""
+    value_label_types = {SeriesType.LINE, SeriesType.SCATTER, SeriesType.BAR, SeriesType.STACKED_BAR}
     for series_type in SeriesType:
         expected = series_type in value_label_types
         assert SERIES_TYPE_SPECS[series_type].supports_value_labels is expected, series_type
@@ -216,3 +217,16 @@ def test_needs_label_column_is_true_only_for_pie():
     for series_type in SeriesType:
         expected = series_type == SeriesType.PIE
         assert SERIES_TYPE_SPECS[series_type].needs_label_column is expected, series_type
+
+
+def test_fit_series_type_spec_exists():
+    from pandaplot.models.chart.fit_style import FitStyle
+    from pandaplot.models.chart.series_type import SeriesType
+    from pandaplot.models.chart.series_type_spec import SERIES_TYPE_SPECS
+
+    spec = SERIES_TYPE_SPECS[SeriesType.FIT]
+    assert spec.style_cls is FitStyle
+    assert spec.marker_mode == "unsupported"
+    assert spec.supports_curve_analysis is False
+    assert spec.supports_value_labels is False
+    assert spec.supports_error_bars is False

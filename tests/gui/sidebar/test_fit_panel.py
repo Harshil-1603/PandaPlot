@@ -13,13 +13,15 @@ from unittest.mock import Mock
 import numpy as np
 import pandas as pd
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QFrame, QPlainTextEdit
 
 from pandaplot.commands.base_command import CommandResult
 from pandaplot.commands.project.chart.apply_fit_command import ApplyFitCommand
 from pandaplot.gui.components.common.p_button import PButton
 from pandaplot.gui.components.sidebar.fit.fit_panel import CUSTOM_SERIES_SENTINEL, FitPanel
-from pandaplot.models.project.items.chart import Chart
+from pandaplot.models.chart.chart_type import ChartType
+from pandaplot.models.project.items.chart import Chart, DataSeries, YAxis, restore_chart_state, snapshot_chart_state
 from pandaplot.models.project.items.dataset import Dataset
 from pandaplot.models.project.project import Project
 from pandaplot.models.state.app_context import AppContext
@@ -105,6 +107,70 @@ def test_equation_label_uses_theme_tokens_not_hardcoded_colors(app_context):
     assert "#E2E2E2" in style
 
 
+def test_fit_models_are_filtered_by_category(app_context):
+    panel = FitPanel(app_context)
+
+    assert [panel.fit_type_combo.itemData(i) for i in range(panel.fit_type_combo.count())] == [
+        "Linear", "Quadratic", "Cubic", "Quartic", "Quintic"
+    ]
+
+    panel.fit_category_combo.setCurrentText("Exponential")
+
+    assert [panel.fit_type_combo.itemData(i) for i in range(panel.fit_type_combo.count())] == [
+        "Exponential", "Exponential Decay", "Exponential Growth to Maximum"
+    ]
+
+    panel.fit_category_combo.setCurrentText("Custom")
+    assert [panel.fit_type_combo.itemData(i) for i in range(panel.fit_type_combo.count())] == [
+        "Custom Function"
+    ]
+
+
+def test_fit_results_use_a_transparent_plain_text_display(app_context):
+    panel = FitPanel(app_context)
+
+    assert isinstance(panel.results_text, QPlainTextEdit)
+    assert panel.results_text.frameShape() == QFrame.Shape.NoFrame
+    assert "background-color: transparent" in panel.results_text.styleSheet()
+
+
+def test_fit_points_control_is_left_aligned_with_other_inputs(app_context):
+    panel = FitPanel(app_context)
+    fit_points_item = panel.fit_options_layout.itemAtPosition(0, 1)
+
+    assert fit_points_item.alignment() & Qt.AlignmentFlag.AlignLeft
+
+
+def test_series_and_category_combos_are_left_aligned_with_fit_points(app_context):
+    panel = FitPanel(app_context)
+
+    assert panel.data_source_layout.itemAtPosition(0, 1).alignment() & Qt.AlignmentFlag.AlignLeft
+    assert panel.fit_type_layout.itemAtPosition(0, 1).alignment() & Qt.AlignmentFlag.AlignLeft
+    assert panel.fit_type_layout.itemAtPosition(1, 1).alignment() & Qt.AlignmentFlag.AlignLeft
+
+
+def test_series_and_category_combos_match_model_combo_minimum_width(app_context):
+    panel = FitPanel(app_context)
+
+    assert panel.series_combo.minimumWidth() == panel.fit_type_combo.minimumWidth()
+    assert panel.fit_category_combo.minimumWidth() == panel.fit_type_combo.minimumWidth()
+
+
+def test_fit_button_requires_enough_points_for_selected_polynomial_degree(app_context):
+    dataset, chart = _make_dataset_and_chart_with_id_only_series()
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+    panel.fit_type_combo.setCurrentText("Quintic (polynomial, degree 5)")
+
+    assert panel.fit_button.isEnabled() is False
+    assert panel.fit_button.toolTip().startswith("At least 6 valid")
+
+
 def test_clear_button_click_invokes_clear_results(app_context):
     panel = FitPanel(app_context)
     panel.results_text.setPlainText("some results")
@@ -166,6 +232,35 @@ def test_get_current_data_resolves_id_only_series(app_context):
     _df, _mask, x_data, y_data, _series = result
     assert len(x_data) == 4
     assert len(y_data) == 4
+
+
+def test_load_chart_object_excludes_fit_series_from_the_source_combo(app_context):
+    """A fit isn't a valid source for a new fit (#304): its dataset_id/
+    x_column/y_column mean "source columns the fit was computed from",
+    not a live column to re-read -- offering it here would let a user
+    silently re-fit the ORIGINAL source data (not the fit's own curve),
+    and fail outright once that source dataset is gone (which a fit is
+    specifically designed to survive)."""
+    from pandaplot.models.chart.fit_style import FitStyle
+
+    dataset, chart = _make_dataset_and_chart_with_id_only_series()
+    chart.add_fit_series(
+        source_dataset_id=dataset.id, x_data=np.array([1.0]), y_data=np.array([2.0]),
+        label="A Fit", style=FitStyle(fit_type="linear"),
+    )
+
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+
+    labels = [panel.series_combo.itemText(i) for i in range(panel.series_combo.count())]
+    assert not any("Fit" in label or "\U0001f527" in label for label in labels)
+    # Plain series + trailing "Custom..." entry, no fit row.
+    assert panel.series_combo.count() == 2
 
 
 def test_load_chart_object_clears_stale_fit_results_across_charts(app_context):
@@ -604,6 +699,7 @@ def test_non_positive_min_invalid_for_logarithmic_fit(app_context):
     panel.show()
     QApplication.processEvents()
 
+    panel.fit_category_combo.setCurrentText("Power & Logarithmic")
     panel.fit_type_combo.setCurrentText("Logarithmic (y = a*ln(x) + b)")
     panel.range_auto_check.setChecked(False)
     panel.range_min_spin.setValue(0.0)
@@ -626,6 +722,7 @@ def test_non_positive_min_valid_for_linear_fit(app_context):
     panel.app_context.app_state.current_project = project
     panel.load_chart_object(chart)
 
+    panel.fit_category_combo.setCurrentText("Polynomial")
     panel.fit_type_combo.setCurrentText("Linear (y = ax + b)")
     panel.range_auto_check.setChecked(False)
     panel.range_min_spin.setValue(-5.0)
@@ -920,6 +1017,7 @@ def test_fit_inputs_are_independent_per_tab_and_close_discards_context(app_conte
 
     _switch_fit_tab(panel, "chart", chart_a.id)
     _select_custom_source(panel, dataset_b, "t2", "v2")
+    panel.fit_category_combo.setCurrentText("Custom")
     panel.fit_type_combo.setCurrentIndex(panel.fit_type_combo.findText("Custom Function"))
     panel.custom_function_edit.setText("a*x+b")
     panel.custom_params_edit.setText("a,b")
@@ -933,6 +1031,7 @@ def test_fit_inputs_are_independent_per_tab_and_close_discards_context(app_conte
     panel.fit_results = _make_fake_fit_result()
 
     _switch_fit_tab(panel, "dataset", dataset_a.id)
+    assert panel.fit_category_combo.currentText() == panel.fit_category_combo.itemText(0)
     assert panel.fit_type_combo.currentIndex() == 0
     assert panel.custom_function_edit.text() == ""
     assert panel.fit_results is None
@@ -946,6 +1045,7 @@ def test_fit_inputs_are_independent_per_tab_and_close_discards_context(app_conte
     assert panel.custom_x_column_combo.currentData() == dataset_b.column_id("t2")
     assert panel.custom_y_column_combo.currentData() == dataset_b.column_id("v2")
     assert panel.fit_type_combo.currentText() == "Custom Function"
+    assert panel.fit_category_combo.currentText() == "Custom"
     assert panel.custom_function_edit.text() == "a*x+b"
     assert panel.custom_params_edit.text() == "a,b"
     assert panel.initial_guess_edit.text() == "a=2"
@@ -1038,6 +1138,81 @@ def test_fit_series_selection_follows_series_after_reorder_and_falls_back_after_
     panel.close()
 
 
+def test_restore_empty_series_selection_clears_a_current_selection(app_context, qtbot):
+    project, _dataset_a, _dataset_b, chart = _make_project_with_two_datasets_and_series_on_first()
+    panel = _show_panel_on_project(app_context, project)
+    qtbot.addWidget(panel)
+    panel.load_chart_object(chart)
+    panel.series_combo.setCurrentIndex(-1)
+    saved = panel._capture_inputs()
+    panel.series_combo.setCurrentIndex(0)
+
+    panel._restore_inputs(saved)
+
+    assert panel.series_combo.currentIndex() == -1
+    assert panel._resolve_selected_series() is None
+    assert not panel.fit_button.isEnabled()
+
+
+def test_empty_series_selection_remains_empty_after_leaving_and_returning(app_context, qtbot):
+    project, _dataset_a, _dataset_b, chart = _make_project_with_two_datasets_and_series_on_first()
+    panel = _show_panel_on_project(app_context, project)
+    qtbot.addWidget(panel)
+    _switch_fit_tab(panel, "chart", chart.id)
+    panel.series_combo.setCurrentIndex(-1)
+    _switch_fit_tab(panel, "other", "welcome")
+
+    _switch_fit_tab(panel, "chart", chart.id)
+
+    assert panel.series_combo.currentIndex() == -1
+
+
+def test_duplicate_series_selection_follows_object_after_reordering(app_context, qtbot):
+    project, dataset_a, _dataset_b, chart = _make_project_with_two_datasets_and_series_on_first()
+    chart.add_data_series(
+        dataset_id=dataset_a.id,
+        x_column_id=dataset_a.column_id("time"),
+        y_column_id=dataset_a.column_id("value"),
+    )
+    selected = chart.data_series[1]
+    panel = _show_panel_on_project(app_context, project)
+    qtbot.addWidget(panel)
+    _switch_fit_tab(panel, "chart", chart.id)
+    panel.series_combo.setCurrentIndex(1)
+    _switch_fit_tab(panel, "other", "welcome")
+    chart.data_series.reverse()
+
+    _switch_fit_tab(panel, "chart", chart.id)
+
+    assert panel.series_combo.currentIndex() == 0
+    assert panel.series_combo.currentData() is selected
+
+
+def test_replaced_series_selection_falls_back_to_column_identity(app_context, qtbot):
+    project, _dataset_a, dataset_b, chart = _make_project_with_two_datasets_and_series_on_first()
+    chart.add_data_series(
+        dataset_id=dataset_b.id,
+        x_column_id=dataset_b.column_id("t2"),
+        y_column_id=dataset_b.column_id("v2"),
+    )
+    panel = _show_panel_on_project(app_context, project)
+    qtbot.addWidget(panel)
+    _switch_fit_tab(panel, "chart", chart.id)
+    panel.series_combo.setCurrentIndex(1)
+    _switch_fit_tab(panel, "other", "welcome")
+    chart.data_series[1] = DataSeries(
+        dataset_id=dataset_b.id,
+        x_column_id=dataset_b.column_id("t2"),
+        y_column_id=dataset_b.column_id("v2"),
+    )
+    replacement = chart.data_series[1]
+    chart.data_series.reverse()
+
+    _switch_fit_tab(panel, "chart", chart.id)
+
+    assert panel.series_combo.currentData() is replacement
+
+
 def test_project_close_drops_all_fit_tab_inputs(app_context):
     project, _dataset_a, _dataset_b, chart = _make_project_with_two_datasets_and_series_on_first()
     panel = _show_panel_on_project(app_context, project)
@@ -1108,6 +1283,62 @@ def test_series_combo_gets_custom_sentinel_entry_when_chart_loaded(app_context):
     last_index = panel.series_combo.count() - 1
     assert panel.series_combo.itemData(last_index) == CUSTOM_SERIES_SENTINEL
     assert panel.series_combo.itemText(last_index) == "Custom..."
+
+
+def test_fit_panel_explains_unsupported_chart_and_disables_fit_controls(app_context):
+    chart = Chart(id="box-chart", name="box chart", chart_type="box")
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    project = Mock()
+    project.find_item.return_value = None
+    project.get_all_items.return_value = []
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+
+    assert panel.fit_availability_label.text() == "Curve fits aren't available for Box Plot charts. Use an XY chart instead."
+    assert panel.fit_availability_label.isHidden() is False
+    assert panel.fit_configuration_group.isEnabled() is False
+    assert panel.fit_button.isEnabled() is False
+    assert panel._perform_fit() is None
+
+
+def test_fit_panel_explains_series_without_x_column(app_context):
+    from pandaplot.models.chart.chart_type import ChartType
+
+    dataset = Dataset(id="values", name="values", data=pd.DataFrame({"value": [1.0, 2.0, 3.0]}))
+    chart = Chart(id="hist-chart", name="hist chart", chart_type=ChartType.HIST)
+    chart.add_data_series(dataset_id=dataset.id, y_column_id=dataset.column_id("value"))
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+
+    assert panel.fit_availability_label.text() == (
+        "This series has no X column for curve fitting. Select an XY series or choose Custom... with X and Y columns."
+    )
+    assert panel.fit_availability_label.isHidden() is False
+    assert panel.fit_configuration_group.isEnabled()
+    assert panel.fit_button.isEnabled() is False
+
+
+def test_fit_controls_reenable_for_fit_capable_chart(app_context):
+    dataset, chart = _make_dataset_and_chart_with_id_only_series()
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+
+    chart.set_chart_type("box")
+    panel.load_chart_object(chart)
+    assert panel.fit_configuration_group.isEnabled() is False
+
+    chart.set_chart_type("scatter")
+    panel.load_chart_object(chart)
+    assert panel.fit_availability_label.isHidden()
+    assert panel.fit_configuration_group.isEnabled()
 
 
 def test_no_chart_leaves_series_combo_empty(app_context):
@@ -1282,6 +1513,28 @@ def _build_panel_ready_to_fit(app_context):
     return panel, executed
 
 
+def test_perform_fit_discards_stale_result_after_switch_to_duplicate_series(app_context, qtbot):
+    panel, executed = _build_panel_ready_to_fit(app_context)
+    qtbot.addWidget(panel)
+    source = panel.current_chart.data_series[0]
+    panel.current_chart.add_data_series(
+        dataset_id=source.dataset_id,
+        x_column_id=source.x_column_id,
+        y_column_id=source.y_column_id,
+    )
+    panel.load_chart_object(panel.current_chart)
+    panel._perform_fit()
+    command = executed["command"]
+    panel.series_combo.setCurrentIndex(1)
+    command.result = _make_fake_fit_result()
+    command.fixed_parameters = None
+
+    command.on_complete(CommandResult.SUCCESS)
+
+    assert panel.fit_results is None
+    assert not panel.apply_button.isEnabled()
+
+
 def test_perform_fit_discards_stale_result_after_chart_switch(app_context):
     """Regression test (PR review): chart/series navigation stays enabled
     while a fit computes in the background. If the user switches to a
@@ -1310,6 +1563,27 @@ def test_perform_fit_discards_stale_result_after_chart_switch(app_context):
     # a context that's no longer current.
     assert panel.busy_spinner.is_running is False
     assert panel.fit_button.isEnabled() is True
+
+
+def test_perform_fit_completion_keeps_fit_disabled_after_switch_to_unsupported_chart(app_context):
+    """Regression test (PR review): an in-flight fit completing after the user
+    loads a chart without fit support must not re-enable the Fit button."""
+    panel, executed = _build_panel_ready_to_fit(app_context)
+
+    panel._perform_fit()
+    command = executed["command"]
+
+    panel.app_context.app_state.current_project.get_all_items = Mock(return_value=[])
+    panel.load_chart_object(Chart(id="box-chart", name="box chart", chart_type="box"))
+    assert panel.fit_button.isEnabled() is False
+
+    command.result = _make_fake_fit_result()
+    command.fixed_parameters = None
+    command.on_complete(CommandResult.SUCCESS)
+
+    assert panel.busy_spinner.is_running is False
+    assert panel.fit_button.isEnabled() is False
+    assert panel.fit_availability_label.isHidden() is False
 
 
 def test_perform_fit_success_path_populates_results_and_stops_spinner(app_context):
@@ -1432,7 +1706,8 @@ def test_perform_fit_failure_path_shows_error_and_stops_spinner(app_context):
     assert panel.apply_button.isEnabled() is False
     assert panel.fit_results is None
     assert panel.results_text.toPlainText() == "Fit did not converge"
-    assert panel.results_text.styleSheet() == "color: red;"
+    assert "color: red;" in panel.results_text.styleSheet()
+    assert "background-color: transparent;" in panel.results_text.styleSheet()
 
 
 def test_perform_fit_sync_dispatch_failure_stops_spinner_without_on_complete(app_context):
@@ -1576,3 +1851,306 @@ class TestFitPanelSeriesSelectedEvent:
         )
 
         assert panel.series_combo.currentIndex() == 0
+
+    def test_series_click_still_selects_after_a_reset_replaced_the_series_objects(self, app_context):
+        """PR #416 review: Reset (and undo of a dataset delete) swap
+        deep-copied DataSeries into the chart and publish CHART_UPDATED
+        with only chart_id. The combo kept the old objects, so the
+        identity-based click sync never matched again."""
+        dataset, chart = self._make_two_series_chart()
+        project = Mock()
+        project.find_item = Mock(return_value=dataset)
+
+        panel = FitPanel(app_context)
+        panel.show()
+        panel.app_context.app_state = Mock()
+        panel.app_context.app_state.current_project = project
+        panel.load_chart_object(chart)
+
+        restore_chart_state(chart, snapshot_chart_state(chart))  # new DataSeries objects
+        panel._on_chart_updated({"chart_id": "chart-1"})
+        panel._on_series_selected_event({"chart_id": "chart-1", "kind": "series", "index": 1})
+
+        assert panel.series_combo.currentData() is chart.data_series[1]
+
+    def test_a_chart_id_only_update_that_replaced_nothing_keeps_the_fit_results(self, app_context):
+        """A live style edit publishes the same chart_id-only event without
+        replacing any series -- it must not reload (which clears results)."""
+        dataset, chart = self._make_two_series_chart()
+        project = Mock()
+        project.find_item = Mock(return_value=dataset)
+
+        panel = FitPanel(app_context)
+        panel.show()
+        panel.app_context.app_state = Mock()
+        panel.app_context.app_state.current_project = project
+        panel.load_chart_object(chart)
+        panel.fit_results = _make_fake_fit_result()
+
+        panel._on_chart_updated({"chart_id": "chart-1"})
+
+        assert panel.fit_results is not None
+
+
+def test_apply_stays_disabled_with_a_tooltip_on_a_chart_type_that_does_not_allow_fits(app_context):
+    dataset, chart = _make_dataset_and_chart_with_id_only_series()
+    chart.set_chart_type("scatter3d")
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+    panel.fit_results = _make_fake_fit_result()
+
+    panel._update_apply_enabled()
+
+    assert panel.apply_button.isEnabled() is False
+    assert "3D Scatter" in panel.apply_button.toolTip()
+
+
+def test_apply_is_enabled_once_a_fit_result_exists_on_a_chart_type_that_allows_fits(app_context):
+    dataset, chart = _make_dataset_and_chart_with_id_only_series()
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+    panel.fit_results = _make_fake_fit_result()
+
+    panel._update_apply_enabled()
+
+    assert panel.apply_button.isEnabled() is True
+    assert panel.apply_button.toolTip() == ""
+
+
+def test_apply_goes_stale_after_a_live_type_switch_to_a_disallowed_type(app_context):
+    """PR #416 round-2 review: a live chart-type switch (Chart tab's combo,
+    ChartTab._on_chart_type_index_changed -> set_chart_type) publishes
+    CHART_UPDATED with only chart_id, since no series objects are replaced.
+    Apply's enabled/tooltip state must still be recomputed for it."""
+    dataset, chart = _make_dataset_and_chart_with_id_only_series()
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+
+    panel = FitPanel(app_context)
+    panel.show()
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+    panel.fit_results = _make_fake_fit_result()
+    panel._update_apply_enabled()
+    assert panel.apply_button.isEnabled() is True
+
+    chart.set_chart_type("colormap")
+    panel._on_chart_updated({"chart_id": chart.id})
+
+    assert panel.apply_button.isEnabled() is False
+    assert "Color Map" in panel.apply_button.toolTip()
+
+
+def test_apply_goes_fresh_again_after_a_live_type_switch_back_to_an_allowed_type(app_context):
+    """Reverse case of the above: switching back to an allowed type live
+    must clear the stale tooltip and offer the chart's series again."""
+    dataset, chart = _make_dataset_and_chart_with_id_only_series()
+    chart.set_chart_type("colormap")
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+
+    panel = FitPanel(app_context)
+    panel.show()
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+    panel.fit_results = _make_fake_fit_result()
+    panel._update_apply_enabled()
+    assert panel.apply_button.isEnabled() is False
+
+    chart.set_chart_type("line")
+    panel._on_chart_updated({"chart_id": chart.id})
+
+    # The series combo was empty on the disallowed type, so it reloads (which
+    # clears the stale result); Apply stays off until a new fit runs, but the
+    # "isn't available" tooltip is gone and the series are offered again.
+    assert panel.series_combo.count() > 0
+    assert panel.apply_button.toolTip() == ""
+
+
+def test_apply_fit_passes_the_fitted_series_y_axis(app_context):
+    dataset, chart = _make_dataset_and_chart_with_id_only_series()
+    chart.data_series[0].y_axis = YAxis.SECONDARY
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+    panel.fit_results = _make_fake_fit_result()
+
+    executed = {}
+
+    def _capture_execute(command):
+        executed["command"] = command
+        return True
+
+    panel.app_context.get_command_executor.return_value.execute_command = _capture_execute
+
+    panel._apply_fit()
+
+    assert executed["command"].y_axis == YAxis.SECONDARY
+
+
+def test_load_chart_object_offers_no_series_when_chart_type_disallows_fits(app_context):
+    dataset, chart = _make_dataset_and_chart_with_id_only_series()
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+
+    panel.load_chart_object(chart)
+    assert panel.series_combo.count() > 1
+
+    chart.set_chart_type(ChartType.STACKED_BAR)
+    panel.load_chart_object(chart)
+
+    assert panel.current_chart is chart
+    assert panel.series_combo.count() == 0
+
+    chart.set_chart_type(ChartType.BAR)
+    panel.load_chart_object(chart)
+
+    assert panel.series_combo.count() > 1
+
+
+def _make_hist_panel(app_context):
+    from pandaplot.models.chart.chart_type import ChartType
+
+    dataset = Dataset(id="values", name="values", data=pd.DataFrame({"value": [1.0, 2.0, 3.0, 4.0, 5.0]}))
+    chart = Chart(id="hist-chart", name="hist chart", chart_type=ChartType.HIST)
+    chart.add_data_series(dataset_id=dataset.id, y_column_id=dataset.column_id("value"))
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+    project.get_all_items = Mock(return_value=[dataset])
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+    return panel
+
+
+def test_custom_mode_with_incomplete_picks_does_not_show_no_x_column_reason(app_context):
+    """Regression test for #468: Custom... is a user-in-progress state, not a series without X."""
+    panel = _make_hist_panel(app_context)
+    assert panel.fit_availability_label.isHidden() is False
+
+    panel.series_combo.setCurrentIndex(panel.series_combo.findData(CUSTOM_SERIES_SENTINEL))
+    panel.custom_x_column_combo.setCurrentIndex(-1)
+
+    assert panel._resolve_selected_series() is None
+    assert panel._fit_unavailable_reason() is None
+    assert panel.fit_availability_label.isHidden() is True
+
+
+def test_fit_button_disabled_with_reason_tooltip_for_series_without_x_column(app_context):
+    """Regression test for #469: a series-level unavailable reason must not leave Fit clickable."""
+    panel = _make_hist_panel(app_context)
+
+    assert panel.fit_availability_label.isHidden() is False
+    assert panel.fit_button.isEnabled() is False
+    assert panel.fit_button.toolTip() == panel.fit_availability_label.text()
+
+
+def test_switching_to_unsupported_chart_clears_stale_points_and_range_warning(app_context):
+    """Regression test for #470: chart-level disallowance must clear the previous chart's readouts."""
+    panel, _executed = _build_panel_ready_to_fit(app_context)
+    assert panel.data_points_label.text() != "No data selected"
+    panel.range_warning_label.setVisible(True)
+
+    panel.app_context.app_state.current_project.get_all_items = Mock(return_value=[])
+    panel.load_chart_object(Chart(id="box-chart", name="box chart", chart_type="box"))
+
+    assert panel.data_points_label.text() == "No data selected"
+    assert panel.range_min_value_label.text() == "—"
+    assert panel.range_max_value_label.text() == "—"
+    assert panel.range_warning_label.isHidden() is True
+    assert panel.data_points_warning_icon.isHidden() is True
+
+
+def test_availability_label_uses_theme_warning_color(app_context):
+    app_context.get_manager.return_value.get_design_tokens.return_value = {
+        "font_size_group_title": 9,
+        "status_modified_text": "#123456",
+    }
+    panel = FitPanel(app_context)
+    panel._apply_theme()
+
+    assert "#123456" in panel.fit_availability_label.styleSheet()
+
+
+def test_panel_refresh_does_not_crash_when_series_dataset_has_no_data(app_context):
+    from pandaplot.models.chart.chart_type import ChartType
+
+    dataset = Dataset(id="empty", name="empty")
+    dataset.data = None  # the constructor normalizes None to an empty frame; this state arises later
+    chart = Chart(id="line-chart", name="line chart", chart_type=ChartType.LINE)
+    series = chart.add_data_series(dataset_id=dataset.id, y_column_id="y")
+    series.x_column = "x"  # legacy name-only reference, resolves without reading dataset.data
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+    project.get_all_items = Mock(return_value=[dataset])
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+
+    panel.load_chart_object(chart)
+
+    assert panel.fit_button.isEnabled() is False
+
+
+def test_no_x_column_hint_ignores_a_leading_fit_series(app_context):
+    """A fit is never offered as a source, so a fit at index 0 (which does
+    carry x column ids) must not hide the hint for the series that are."""
+    from pandaplot.models.chart.chart_type import ChartType
+    from pandaplot.models.chart.fit_style import FitStyle
+
+    dataset = Dataset(id="values", name="values", data=pd.DataFrame({"value": [1.0, 2.0, 3.0]}))
+    chart = Chart(id="hist-chart", name="hist chart", chart_type=ChartType.HIST)
+    chart.add_fit_series(dataset.id, np.array([1.0, 2.0]), np.array([1.0, 2.0]), "Fit", FitStyle(fit_type="Linear"),
+                         source_x_column_id=dataset.column_id("value"), source_y_column_id=dataset.column_id("value"))
+    chart.add_data_series(dataset_id=dataset.id, y_column_id=dataset.column_id("value"))
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+    panel = FitPanel(app_context)
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+
+    assert all(panel.series_combo.itemData(row) is not chart.data_series[0] for row in range(panel.series_combo.count()))
+    assert "no X column" in panel.fit_availability_label.text()
+
+
+def test_live_switch_to_a_type_that_disallows_fits_disables_the_fit_controls_and_keeps_results(app_context):
+    dataset, chart = _make_dataset_and_chart_with_id_only_series()
+    project = Mock()
+    project.find_item = Mock(return_value=dataset)
+
+    panel = FitPanel(app_context)
+    panel.show()
+    panel.app_context.app_state = Mock()
+    panel.app_context.app_state.current_project = project
+    panel.load_chart_object(chart)
+    panel.fit_results = _make_fake_fit_result()
+    assert panel.fit_configuration_group.isEnabled()
+
+    chart.set_chart_type("colormap")
+    panel._on_chart_updated({"chart_id": chart.id})
+
+    assert panel.fit_configuration_group.isEnabled() is False
+    assert panel.series_combo.isEnabled() is False
+    assert panel.fit_button.isEnabled() is False
+    assert panel.fit_results is not None

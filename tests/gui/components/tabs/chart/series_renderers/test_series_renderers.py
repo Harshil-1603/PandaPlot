@@ -507,6 +507,17 @@ def test_render_hist_series_draws_a_histogram():
     plt.close(fig)
 
 
+def test_render_hist_series_skips_hidden_series():
+    fig, ax = plt.subplots()
+    style = HistSeriesStyle(color="#ababab")
+
+    render_hist_series(ax, _series_data(y_data=list(range(20))), style, "My Hist", 1.0, visible=False, extra={"bins": 5})
+
+    assert len(ax.patches) == 0
+    assert ax.get_legend_handles_labels() == ([], [])
+    plt.close(fig)
+
+
 def test_render_vector_series_draws_a_quiver():
     fig, ax = plt.subplots()
     style = VectorSeriesStyle(vector_color="#00ff00")
@@ -1230,3 +1241,19 @@ def test_render_hist_series_returns_none_and_reports_no_data_without_numeric_val
     assert SeriesType.HIST in SERIES_RENDERERS_REPORTING_NO_DATA
     assert not ax.patches
     plt.close(fig)
+
+
+def test_fill_sections_union_masks_and_merge_touching_ranges():
+    from pandaplot.gui.components.tabs.chart.series_renderers.fill import fill_range_mask
+    from pandaplot.models.chart.series_style import LineSeriesStyle
+
+    style = LineSeriesStyle(fill_sections=[(5, 7), (1, 2), (3, 4), (10, 99)])
+
+    assert fill_range_mask(style, 10).tolist() == [False, True, True, True, True, True, True, True, False, True]
+
+
+def test_empty_fill_sections_mask_the_whole_series():
+    from pandaplot.gui.components.tabs.chart.series_renderers.fill import fill_range_mask
+    from pandaplot.models.chart.series_style import LineSeriesStyle
+
+    assert fill_range_mask(LineSeriesStyle(), 4).tolist() == [True, True, True, True]

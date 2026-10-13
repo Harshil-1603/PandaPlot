@@ -118,6 +118,7 @@ class TabContainer(PWidget):
             p.set_active(is_active=show_indicator and p is pane)
 
         if pane is self._active_pane:
+            self._emit_tab_changed_for_active_pane()
             return
         self._active_pane = pane
         self._emit_tab_changed_for_active_pane()
@@ -126,6 +127,10 @@ class TabContainer(PWidget):
         """Clicking anywhere inside a pane (not just its tab header) activates it."""
         if new is None:
             return
+        for item_id, window in self.floating_windows.items():
+            if window is new or window.isAncestorOf(new):
+                self._on_floating_tab_activated(item_id)
+                return
         for pane in self.panes:
             if pane is new or pane.isAncestorOf(new):
                 self._activate_pane(pane)
@@ -230,22 +235,20 @@ class TabContainer(PWidget):
         if self.app_context and not self.app_context.get_app_state().has_project:
             self.create_welcome_tab()
 
-    def _handle_close(self, pane: CustomTabWidget, index: int):
-        """
-        Handle tab close request.
-
-        Args:
-            pane: The pane the tab belongs to
-            index (int): The index of the tab to close
-        """
+    def _handle_close(self, pane: CustomTabWidget, index: int, *, user_initiated: bool = True):
+        """Remove a tab, consulting its close guard only for user closes."""
         if index < 0 or index >= pane.count():
             return
 
         # Get tab title before removing
         tab_title = pane.tabText(index)
 
-        # Get the widget before removing the tab
+        # Leave the widget and its subscriptions intact if a pending edit
+        # cannot be saved. Other tab types have no close hook.
         widget = pane.widget(index)
+        can_close = getattr(widget, "can_close", None)
+        if user_initiated and callable(can_close) and not can_close():
+            return
         tab_data = self.get_tab_data(widget) if widget is not None else {}
 
         item_id_to_remove = None
@@ -285,10 +288,13 @@ class TabContainer(PWidget):
 
         self._persist_tab_session()
 
-    def close_tab_by_item_id(self, item_id: str):
-        """Close a tab by its associated item ID, if open."""
+    def close_tab_by_item_id(self, item_id: str, *, user_initiated: bool = False):
+        """Close a tab by item ID; model-removal events are forced closes."""
         # Popped-out tabs live in their own window; close it without re-docking.
         if item_id in self.floating_windows:
+            # Check the hosted tab before removing it from either registry.
+            if user_initiated and not self.can_close_floating_tab(item_id):
+                return
             window = self.floating_windows.pop(item_id)
             self.tabs.pop(item_id, None)
             tab_title = window.windowTitle()
@@ -320,7 +326,7 @@ class TabContainer(PWidget):
             pane = self._pane_of(tab_widget)
             index = pane.indexOf(tab_widget) if pane is not None else -1
             if pane is not None and index >= 0:
-                self._handle_close(pane, index)
+                self._handle_close(pane, index, user_initiated=user_initiated)
                 return
         except RuntimeError:
             pass
@@ -361,6 +367,7 @@ class TabContainer(PWidget):
 
         window = FloatingTabWindow(self.app_context, item_id, widget, title)
         window.redock_requested.connect(self.redock_tab)
+        window.activated.connect(self._on_floating_tab_activated)
         self.floating_windows[item_id] = window
         window.show()
         window.raise_()
@@ -369,6 +376,12 @@ class TabContainer(PWidget):
         # A pane emptied by the popout should collapse back.
         self._maybe_collapse_pane(pane)
         self._persist_tab_session()
+
+    def can_close_floating_tab(self, item_id: str) -> bool:
+        """Apply the same user-close guard to a floating window as a tab close."""
+        content = self.tabs.get(item_id)
+        can_close = getattr(content, "can_close", None)
+        return not callable(can_close) or can_close()
 
     def redock_tab(self, item_id: str):
         """Return a popped-out tab to the active pane of the main container."""
@@ -629,6 +642,18 @@ class TabContainer(PWidget):
         """
         return self.command_manager.create_chart_from_dataset(dataset_id, preselected_column_ids)
 
+    def analyze_measurements_for_dataset(
+        self,
+        dataset_id: str,
+        *,
+        parent_widget: QWidget | None = None,
+    ) -> None:
+        """Open measurement analysis for a dataset tab or Project Explorer action."""
+        return self.command_manager.analyze_measurements_for_dataset(
+            dataset_id,
+            parent_widget=parent_widget if parent_widget is not None else self,
+        )
+
     def on_project_closed(self):
         """Called when a project is closed - close all project-related tabs and show welcome tab if no tabs are open."""
         self.logger.info("Closing all project-related tabs")
@@ -659,7 +684,7 @@ class TabContainer(PWidget):
                 pane = self._pane_of(tab_widget)
                 index = pane.indexOf(tab_widget) if pane is not None else -1
                 if pane is not None and index >= 0:
-                    self._handle_close(pane, index)
+                    self._handle_close(pane, index, user_initiated=False)
                 else:
                     # Tab not found in tab container, remove from tracking
                     self.logger.warning("Tab widget not found in tab container, cleaning up tracking")
@@ -691,7 +716,7 @@ class TabContainer(PWidget):
             (AnalysisEvents.ANALYSIS_COMPLETED, self.on_analysis_completed),
             (ChartEvents.CHART_CREATED, lambda event_data: self.open_tab(event_data.get("chart_id"))),
             (UIEvents.TAB_OPEN_REQUESTED, lambda event_data: self.open_tab(event_data.get("item_id"))),
-            (ProjectEvents.PROJECT_ITEM_REMOVED, lambda event_data: self.close_tab_by_item_id(event_data.get("item_id"))),
+            (ProjectEvents.PROJECT_ITEM_REMOVED, lambda event_data: self.close_tab_by_item_id(event_data.get("item_id"), user_initiated=False)),
         ])
 
     def _handle_pane_current_changed(self, pane: CustomTabWidget, index: int):
@@ -704,7 +729,17 @@ class TabContainer(PWidget):
         current tab, deduped so unrelated focus churn doesn't spam the sidebar."""
         pane = self._active_pane
         widget = pane.currentWidget() if pane else None
+        index = pane.currentIndex() if pane else -1
+        title = pane.tabText(index) if pane and index >= 0 else ""
+        self._emit_tab_changed_for_widget(widget, index=index, title=title)
 
+    def _on_floating_tab_activated(self, item_id: str) -> None:
+        window = self.floating_windows.get(item_id)
+        widget = self.tabs.get(item_id)
+        if window is not None and widget is not None:
+            self._emit_tab_changed_for_widget(widget, index=-1, title=window.windowTitle())
+
+    def _emit_tab_changed_for_widget(self, widget: QWidget | None, *, index: int, title: str) -> None:
         if widget is self._last_emitted_widget:
             return
         self._last_emitted_widget = widget
@@ -712,13 +747,12 @@ class TabContainer(PWidget):
         self.active_tab_changed.emit(widget)
 
         tab_data = self.get_tab_data(widget) if widget is not None else {"type": None, "id": None}
-        index = pane.currentIndex() if pane else -1
 
         self.publish_event(UIEvents.TAB_CHANGED, {
             "tab_index": index,
             "tab_type": tab_data.get("type"),
             "tab_id": tab_data.get("id"),
-            "tab_title": pane.tabText(index) if pane and index >= 0 else "",
+            "tab_title": title,
         })
 
         self._persist_tab_session()

@@ -141,8 +141,10 @@ def test_fits_are_allowed_on_every_2d_xy_chart_type_and_nothing_else():
     # them, since a 2-D curve fit has no meaning on a 3-D chart. DENSITY:
     # its plotted curve is a computed estimate, not (x, y) data to fit. BOX has
     # no (x, y) curve at all -- each series is one summarized distribution. PIE
-    # has no (x, y) space at all, so no curve to fit either.
-    no_fit = {ChartType.COLORMAP, ChartType.HEATMAP, ChartType.DENSITY, ChartType.BOX, ChartType.PIE} | {
+    # has no (x, y) space at all, so no curve to fit either. STACKED_BAR: a fit
+    # runs on a series' raw values, which don't line up with where a stacked
+    # series' bars are actually drawn.
+    no_fit = {ChartType.COLORMAP, ChartType.HEATMAP, ChartType.DENSITY, ChartType.BOX, ChartType.PIE, ChartType.STACKED_BAR} | {
         chart_type for chart_type, spec in CHART_TYPE_SPECS.items() if spec.is_3d
     }
     for chart_type, spec in CHART_TYPE_SPECS.items():
@@ -297,6 +299,28 @@ def test_compatible_chart_types_for_series_single_vector_matches_existing_vector
     assert ChartType.LINE in result
     assert ChartType.SCATTER in result
     assert ChartType.VECTOR in result
+
+
+def test_no_chart_type_lists_fit_in_allowed_series_types():
+    """FIT isn't a user-selectable series type -- `allows_fit` says where a
+    fit can be created, and set_chart_type never retypes one -- so listing
+    it in allowed_series_types only forced every consumer to subtract it
+    again (PR #416 review)."""
+    for chart_type, spec in CHART_TYPE_SPECS.items():
+        assert SeriesType.FIT not in spec.allowed_series_types, chart_type
+
+
+def test_compatible_chart_types_for_series_treats_fit_as_has_fits():
+    from pandaplot.models.chart.chart_type_spec import compatible_chart_types_for_series
+
+    with_fit = compatible_chart_types_for_series(frozenset({SeriesType.LINE, SeriesType.FIT}))
+    assert with_fit == compatible_chart_types_for_series(frozenset({SeriesType.LINE}), has_fits=True)
+
+    fit_only = compatible_chart_types_for_series(frozenset({SeriesType.FIT}))
+    # A fit only survives on chart types that can render one (allows_fit),
+    # which also rules out every 3-D type.
+    assert fit_only == frozenset(t for t, spec in CHART_TYPE_SPECS.items() if spec.allows_fit)
+    assert ChartType.COLORMAP not in fit_only
 
 
 def test_hist_density_is_keyword_only_so_positional_has_axes_callers_keep_working():

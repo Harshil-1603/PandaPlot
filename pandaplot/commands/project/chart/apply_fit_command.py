@@ -8,16 +8,18 @@ import pandas as pd
 
 from pandaplot.commands.base_command import Command, CommandResult
 from pandaplot.commands.project.chart.chart_finder import ChartFinder
+from pandaplot.commands.project.chart.fit_guard import reject_if_fit_disallowed
 from pandaplot.gui.controllers.ui_controller import UIController
 from pandaplot.models.chart.fit_style import FitStyle
 from pandaplot.models.events import ChartEvents
 from pandaplot.models.events.event_types import DatasetEvents, ProjectEvents
 from pandaplot.models.project.items import Dataset, Note
+from pandaplot.models.project.items.chart import YAxis
 from pandaplot.models.state import AppContext
+from pandaplot.services.fit.fit_service import FIT_DEFINITIONS
 
-# Maps a short fit-type name to its chart color. `fit_type` from the fit panel is a
-# full descriptive string (e.g. "Linear (y = ax + b)"), so lookups use substring
-# matching rather than exact-match, mirroring FitService._get_fit_func.
+# Chart colors by fit name. Built-in fits not listed here take their category color.
+# Legacy `fit_type` strings that do not name a built-in fit are matched by substring.
 FIT_TYPE_COLORS = {
     "Linear": "#ff0000",       # Red
     "Quadratic": "#00aa00",    # Green
@@ -27,9 +29,28 @@ FIT_TYPE_COLORS = {
     "Custom": "#00cccc",       # Cyan
 }
 
+FIT_CATEGORY_COLORS = {
+    "Polynomial": "#00aa00",
+    "Exponential": "#0066cc",
+    "Sigmoid": "#8844dd",
+    "Peak": "#cc9900",
+    "Periodic": "#dd3377",
+    "Power & Logarithmic": "#cc00cc",
+}
+
 
 def _resolve_fit_style(fit_type: str) -> tuple[str, str]:
-    """Return (short_name, color) for a fit_type string like 'Linear (y = ax + b)'."""
+    """Return (name, color) for a fit_type like 'Linear' or 'Linear (y = ax + b)'.
+
+    Built-in fits keep their full model name so names such as 'Exponential Decay'
+    are not shortened to 'Exponential'.
+    """
+    fit_name = fit_type.split(" (")[0]
+    if fit_name in FIT_TYPE_COLORS:
+        return fit_name, FIT_TYPE_COLORS[fit_name]
+    definition = FIT_DEFINITIONS.get(fit_name)
+    if definition is not None:
+        return fit_name, FIT_CATEGORY_COLORS.get(definition["category"], "#ff0000")
     for short_name, color in FIT_TYPE_COLORS.items():
         if short_name in fit_type:
             return short_name, color
@@ -53,6 +74,8 @@ class ApplyFitCommand(Command):
         source_y_column: str = "",
         label: str = "",
         fixed_parameters: str | None = None,
+        *,
+        y_axis: "YAxis | str" = YAxis.PRIMARY,
     ):
         super().__init__()
 
@@ -68,6 +91,10 @@ class ApplyFitCommand(Command):
         self.source_y_column = source_y_column
         self.label = label
         self.fixed_parameters = fixed_parameters
+        # The fitted series' own axis, passed by the caller (the Fit panel
+        # knows which series was fitted); a "Custom..." source defaults to
+        # primary. Editable afterwards like any series' y_axis.
+        self.y_axis = YAxis(y_axis)
 
         self.added_index: int | None = None
 
@@ -250,31 +277,40 @@ class ApplyFitCommand(Command):
             )
             return CommandResult.FAILURE
 
+        guard = reject_if_fit_disallowed(
+            chart, logger=self.logger, ui_controller=self.ui_controller,
+            action="ApplyFitCommand.execute", dialog_title="Apply Fit Error",
+            on_disallowed=CommandResult.FAILURE,
+        )
+        if guard is not None:
+            return guard
+
         results = self.fit_results
 
         short_fit_name, fit_color = _resolve_fit_style(results.fit_type)
         label = self.label or f"{short_fit_name} Fit: ({results.equation})"
 
-        chart.add_fit_data(
-            source_dataset_id=self.source_dataset_id,
-            source_x_column_id=self.source_x_column_id,
-            source_y_column_id=self.source_y_column_id,
+        style = FitStyle(
+            color=fit_color, line_style="dashed", line_width=2.0,
             fit_type=results.fit_type,
-            x_data=results.x_fit,
-            y_data=results.y_fit,
-            source_x_column=self.source_x_column,
-            source_y_column=self.source_y_column,
-            label=label,
-            style=FitStyle(color=fit_color, line_style="dashed", line_width=2.0),
             fit_params=results.params,
-            fit_stats={
-                "r_squared": results.r_squared,
-            },
+            fit_stats={"r_squared": results.r_squared},
             confidence_lower=results.confidence_lower,
             confidence_upper=results.confidence_upper,
         )
+        chart.add_fit_series(
+            source_dataset_id=self.source_dataset_id,
+            x_data=results.x_fit, y_data=results.y_fit,
+            source_x_column_id=self.source_x_column_id,
+            source_y_column_id=self.source_y_column_id,
+            source_x_column=self.source_x_column,
+            source_y_column=self.source_y_column,
+            label=label,
+            style=style,
+            y_axis=self.y_axis,
+        )
 
-        self.added_index = len(chart.fit_data) - 1
+        self.added_index = len(chart.data_series) - 1
 
         self.app_context.event_bus.emit(
             ChartEvents.CHART_UPDATED,
@@ -304,7 +340,7 @@ class ApplyFitCommand(Command):
             )
             return CommandResult.FAILURE
 
-        chart.remove_fit_data(self.added_index)
+        chart.remove_data_series(self.added_index)
 
         self.app_context.event_bus.emit(
             ChartEvents.CHART_UPDATED,
@@ -324,6 +360,23 @@ class ApplyFitCommand(Command):
 
     @override
     def redo(self) -> CommandResult:
+        # Check the allows_fit guard *before* falling into execute()'s
+        # shared logic: if the chart's type changed to a disallowed one
+        # between the original execute/undo and this redo (round-2 review,
+        # Minor 2), execute() would return FAILURE, which CommandExecutor
+        # still pushes onto the undo stack -- a later undo of that phantom
+        # entry would then act on self.added_index against whatever is
+        # really at that position now. ABORTED instead leaves this command
+        # on the redo stack untouched, as if this call never happened.
+        chart = self._chart_finder.find(self.chart_id)
+        if chart is not None:
+            guard = reject_if_fit_disallowed(
+                chart, logger=self.logger, ui_controller=self.ui_controller,
+                action="ApplyFitCommand.redo", dialog_title="Apply Fit Error",
+                on_disallowed=CommandResult.ABORTED,
+            )
+            if guard is not None:
+                return guard
         return self.execute()
 
     @override
