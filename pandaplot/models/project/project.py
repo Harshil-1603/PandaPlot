@@ -44,6 +44,8 @@ class Project:
         siblings instead of appending it (see ItemCollection.add_item()).
         A non-collection parent resolves to its nearest ancestor collection;
         missing or cyclic parent chains fall back to the root.
+        Re-adding an attached item moves it from its previous collection,
+        or reorders it within the same collection.
 
         Raises:
             ValueError: If the item's subtree reuses an id already in the
@@ -67,6 +69,9 @@ class Project:
             parent = self.root
         if self.is_item_or_descendant(item, parent.id):
             raise ValueError("Cannot attach an item to itself or its descendants")
+        previous_parent = self._find_parent_collection(item)
+        if previous_parent is not None and previous_parent.get_item_by_id(item.id) is item:
+            previous_parent.remove_item(item)
         parent.add_item(item, index=index)
 
         # Index the full subtree when restoring or attaching a collection.
